@@ -11,6 +11,16 @@ from core.theme_manager import ThemeManager, Theme
 from core.voice_manager import VoiceManager
 from core.splash_screen import SplashScreen
 
+# Create a simple red square icon for the system tray
+def create_app_icon():
+    from PySide6.QtGui import QPixmap, QPainter, QColor
+    icon = QPixmap(32, 32)
+    icon.fill(Qt.transparent)
+    painter = QPainter(icon)
+    painter.fillRect(4, 4, 24, 24, QColor("#c41e3a"))  # Dark red color
+    painter.end()
+    return QIcon(icon)
+
 
 # === Helper function: Apply dark theme ===
 def apply_dark_theme(app):
@@ -33,6 +43,9 @@ def apply_dark_theme(app):
 
     app.setPalette(palette)
 
+def show_voice_notification(tray_icon, message):
+    """Show a system tray notification for voice commands"""
+    tray_icon.showMessage("Voice Command", message, QSystemTrayIcon.Information, 2000)
 
 # === Main window ===
 class TermsDialog(QDialog):
@@ -91,13 +104,18 @@ class DurangMain(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        # Show splash screen``
+        # Show splash screen
         self.splash = SplashScreen()
         self.splash.show()
         
-        # Initialize voice manager
+        # Initialize voice manager (but don't start listening yet)
         self.voice_manager = VoiceManager()
         self.voice_manager.voice_command_received.connect(self.handle_voice_command)
+        self.voice_manager.recording_started.connect(self.on_recording_started)
+        self.voice_manager.recording_stopped.connect(self.on_recording_stopped)
+        self.voice_manager.error_occurred.connect(self.on_voice_error)
+        self.voice_manager.recording_stopped.connect(lambda: self.statusBar().showMessage("Processing..."))
+        self.voice_manager.error_occurred.connect(lambda msg: self.statusBar().showMessage(f"Error: {msg}", 5000))
         
         # Use timer to simulate loading and initialize UI after splash
         QTimer.singleShot(2000, self.delayed_init)
@@ -125,25 +143,99 @@ class DurangMain(QMainWindow):
         self.splash.close()
         self.show()
         
-        # Start voice recognition in background
-        self.voice_manager.start_listening()
-        
     def handle_voice_command(self, command):
         """Handle voice commands received from VoiceManager"""
-        command = command.lower()
-        if "save" in command:
-            self.save_note()
-        elif "new" in command:
-            self.new_note()
-        elif "list" in command:
-            self.list_notes()
-        elif "bold" in command:
-            self.toggle_bold()
-        elif "italic" in command:
-            self.toggle_italic()
+        try:
+            action = self.voice_manager.process_command(command)
+            feedback = f"Voice command: {command}"
+            
+            try:
+                # File operations
+                if action == "new":
+                    self.new_note()
+                elif action == "save":
+                    self.save_note()
+                elif action == "list":
+                    self.list_notes()
+                elif action == "clear":
+                    self.text_edit.clear()
+                elif action == "quit":
+                    self.close()
+                
+                # Text formatting
+                elif action == "format:bold":
+                    self.toggle_bold()
+                elif action == "format:italic":
+                    self.toggle_italic()
+                elif action == "format:normal":
+                    format = self.text_edit.currentCharFormat()
+                    format.setFontWeight(QFont.Normal)
+                    format.setFontItalic(False)
+                    self.text_edit.setCurrentCharFormat(format)
+                elif action.startswith("format:size:"):
+                    size = int(action.split(":")[-1])
+                    self.text_edit.setFontPointSize(size)
+                elif action.startswith("format:color:"):
+                    color_name = action.split(":")[-1]
+                    self.text_edit.setTextColor(QColor(color_name))
+                elif action.startswith("format:title:"):
+                    text = action.split(":", 2)[-1]
+                    format = self.text_edit.currentCharFormat()
+                    format.setFontPointSize(24)
+                    format.setFontWeight(QFont.Bold)
+                    self.text_edit.setCurrentCharFormat(format)
+                    self.text_edit.insertPlainText(text + "\n")
+                elif action.startswith("format:heading:"):
+                    text = action.split(":", 2)[-1]
+                    format = self.text_edit.currentCharFormat()
+                    format.setFontPointSize(18)
+                    format.setFontWeight(QFont.Bold)
+                    self.text_edit.setCurrentCharFormat(format)
+                    self.text_edit.insertPlainText(text + "\n")
+                
+                # Navigation
+                elif action == "nav:top":
+                    cursor = self.text_edit.textCursor()
+                    cursor.movePosition(cursor.Start)
+                    self.text_edit.setTextCursor(cursor)
+                elif action == "nav:bottom":
+                    cursor = self.text_edit.textCursor()
+                    cursor.movePosition(cursor.End)
+                    self.text_edit.setTextCursor(cursor)
+                elif action == "nav:select_all":
+                    self.text_edit.selectAll()
+                elif action == "nav:copy":
+                    self.text_edit.copy()
+                elif action == "nav:paste":
+                    self.text_edit.paste()
+                elif action == "nav:undo":
+                    self.text_edit.undo()
+                elif action == "nav:redo":
+                    self.text_edit.redo()
+                
+                # Show dialogs
+                elif action == "show:about":
+                    self.show_about()
+                elif action == "show:help":
+                    self.show_help()
+                elif action == "show:credits":
+                    self.show_credits()
+                
+                # Text insertion
+                elif action.startswith("text:"):
+                    text = action[5:]
+                    self.text_edit.insertPlainText(text + " ")
+                
+                # Show feedback in status bar
+                self.statusBar().showMessage(feedback, 3000)
+            
+            except Exception as e:
+                self.statusBar().showMessage(f"Error executing command: {str(e)}", 5000)
+                print(f"Error executing voice command: {str(e)}")
         
-        # Show feedback in status bar
-        self.statusBar().showMessage(f"Voice command: {command}", 3000)
+        except Exception as e:
+            self.statusBar().showMessage("Error processing voice command", 3000)
+            print(f"Error in voice command handling: {str(e)}")
     
     def setup_menubar(self):
         menubar = self.menuBar()
@@ -210,13 +302,29 @@ class DurangMain(QMainWindow):
         # Help menu
         help_menu = menubar.addMenu("&Help")
         
+        voice_help_action = QAction("🎤 &Voice Commands", self)
+        voice_help_action.setStatusTip("Learn about available voice commands")
+        voice_help_action.triggered.connect(self.show_voice_commands)
+        voice_help_action.setShortcut("F1")
+        help_menu.addAction(voice_help_action)
+        
+        help_menu.addSeparator()
+        
         terms_action = QAction("&Terms && Conditions", self)
         terms_action.triggered.connect(self.show_terms)
         help_menu.addAction(terms_action)
         
-        about_action = QAction("&About", self)
+        help_menu.addSeparator()
+        
+        about_action = QAction("&About DurangDBack", self)
+        about_action.setStatusTip("Learn more about DurangDBack")
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+        
+        credits_action = QAction("&Credits", self)
+        credits_action.setStatusTip("View development team and acknowledgments")
+        credits_action.triggered.connect(self.show_credits)
+        help_menu.addAction(credits_action)
         
     def setup_theme_actions(self, theme_menu):
         self.theme_group = QActionGroup(self)
@@ -271,6 +379,60 @@ class DurangMain(QMainWindow):
         list_btn.setStatusTip("Show saved notes")
         list_btn.clicked.connect(self.list_notes)
         toolbar.addWidget(list_btn)
+        
+        # Add separator
+        toolbar.addSeparator()
+        
+        # Voice command button (Press to talk)
+        self.voice_btn = QPushButton("🎤")  # Microphone emoji
+        self.voice_btn.setStatusTip("Press and hold to give voice commands")
+        self.voice_btn.setFixedSize(32, 32)  # Make it square
+        self.voice_btn.setStyleSheet("""
+            QPushButton {
+                border-radius: 16px;
+                background-color: #444;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:pressed {
+                background-color: #c41e3a;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+        """)
+        # Use press and release events instead of toggle
+        self.voice_btn.pressed.connect(self.start_voice_assistant)
+        self.voice_btn.released.connect(self.stop_voice_assistant)
+        toolbar.addWidget(self.voice_btn)
+        
+        # Add separator
+        toolbar.addSeparator()
+        
+        # Text-to-speech button
+        self.speak_btn = QPushButton("🔊")  # Speaker emoji
+        self.speak_btn.setCheckable(True)
+        self.speak_btn.setStatusTip("Read note aloud")
+        self.speak_btn.setFixedSize(32, 32)
+        self.speak_btn.setStyleSheet("""
+            QPushButton {
+                border-radius: 16px;
+                background-color: #444;
+                color: white;
+                font-size: 16px;
+            }
+            QPushButton:checked {
+                background-color: #006400;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+            QPushButton:checked:hover {
+                background-color: #008000;
+            }
+        """)
+        self.voice_btn.clicked.connect(self.toggle_voice_assistant)
+        toolbar.addWidget(self.voice_btn)
     
     def setup_central_widget(self):
         self.text_edit = QTextEdit()
@@ -340,6 +502,114 @@ class DurangMain(QMainWindow):
         if self.size_combo.currentText() != size:
             self.size_combo.setCurrentText(size)
             
+    def start_voice_assistant(self):
+        """Start voice assistant when button is pressed"""
+        try:
+            if not hasattr(self, 'voice_manager'):
+                self.voice_manager = VoiceManager()
+                self.voice_manager.voice_command_received.connect(self.handle_voice_command)
+                self.voice_manager.recording_started.connect(self.on_recording_started)
+                self.voice_manager.recording_stopped.connect(self.on_recording_stopped)
+                self.voice_manager.error_occurred.connect(self.on_voice_error)
+                self.voice_manager.speech_started.connect(self.on_speech_started)
+                self.voice_manager.speech_finished.connect(self.on_speech_finished)
+
+            # Show help message for first-time users
+            if not hasattr(self, '_voice_help_shown'):
+                self._voice_help_shown = True
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Information)
+                msg.setWindowTitle("Voice Commands Available")
+                msg.setText("Voice assistant is ready! Would you like to see available voice commands?")
+                msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                if msg.exec() == QMessageBox.Yes:
+                    self.show_voice_commands()
+            
+            # Start listening
+            self.voice_manager.start_listening()
+            self.statusBar().showMessage("Listening for command - Release button when done")
+        except Exception as e:
+            self.statusBar().showMessage(f"Failed to start voice assistant: {str(e)}", 5000)
+            print(f"Error starting voice assistant: {str(e)}")
+    
+    def stop_voice_assistant(self):
+        """Stop voice assistant when button is released"""
+        try:
+            if hasattr(self, 'voice_manager'):
+                self.voice_manager.stop_listening()
+            self.statusBar().showMessage("Processing command...")
+        except Exception as e:
+            self.statusBar().showMessage(f"Error stopping voice assistant: {str(e)}", 5000)
+            print(f"Error stopping voice assistant: {str(e)}")
+    
+    def toggle_text_to_speech(self):
+        """Toggle reading the note aloud"""
+        try:
+            if not hasattr(self, 'voice_manager'):
+                self.voice_manager = VoiceManager()
+                self.voice_manager.speech_started.connect(self.on_speech_started)
+                self.voice_manager.speech_finished.connect(self.on_speech_finished)
+            
+            if self.speak_btn.isChecked():
+                # Get selected text or all text
+                text = self.text_edit.textCursor().selectedText()
+                if not text:
+                    text = self.text_edit.toPlainText()
+                
+                if text:
+                    self.voice_manager.speak_text(text)
+                    self.statusBar().showMessage("Reading text aloud...")
+                else:
+                    self.speak_btn.setChecked(False)
+                    self.statusBar().showMessage("No text to read", 3000)
+            else:
+                self.voice_manager.stop_speaking()
+                self.statusBar().showMessage("Stopped reading", 3000)
+        except Exception as e:
+            self.speak_btn.setChecked(False)
+            self.statusBar().showMessage(f"Error in text-to-speech: {str(e)}", 5000)
+            print(f"Error in text-to-speech: {str(e)}")
+    
+    def on_speech_started(self):
+        """Handle speech started signal"""
+        self.speak_btn.setChecked(True)
+        self.speak_btn.setStatusTip("Click to stop reading")
+    
+    def on_speech_finished(self):
+        """Handle speech finished signal"""
+        self.speak_btn.setChecked(False)
+        self.speak_btn.setStatusTip("Read note aloud")
+        self.statusBar().showMessage("Finished reading", 3000)
+            
+    def on_recording_started(self):
+        """Handle recording started signal"""
+        try:
+            self.statusBar().showMessage("Listening...")
+            if hasattr(self, 'voice_btn'):
+                self.voice_btn.setStyleSheet(self.voice_btn.styleSheet() + "QPushButton:checked { background-color: #00ff00; }")
+        except Exception as e:
+            print(f"Error in recording started handler: {str(e)}")
+        
+    def on_recording_stopped(self):
+        """Handle recording stopped signal"""
+        try:
+            self.statusBar().showMessage("Processing...")
+            if hasattr(self, 'voice_btn'):
+                self.voice_btn.setStyleSheet(self.voice_btn.styleSheet().replace("background-color: #00ff00;", "background-color: #c41e3a;"))
+        except Exception as e:
+            print(f"Error in recording stopped handler: {str(e)}")
+        
+    def on_voice_error(self, error_msg):
+        """Handle voice recognition errors"""
+        try:
+            self.statusBar().showMessage(f"Error: {error_msg}", 5000)
+            if hasattr(self, 'voice_btn'):
+                self.voice_btn.setChecked(False)
+            if hasattr(self, 'voice_manager'):
+                self.voice_manager.stop_listening()
+        except Exception as e:
+            print(f"Error in voice error handler: {str(e)}")
+            
     def toggle_bold(self):
         """Toggle bold formatting on selected text"""
         if self.text_edit.hasFocus():
@@ -390,11 +660,138 @@ class DurangMain(QMainWindow):
         return dialog.exec()
     
     def show_about(self):
-        QMessageBox.about(self, "About DurangDBack",
-                         """<h3>DurangDBack Notepad</h3>
-                         <p>A professional note-taking application with automatic backups.</p>
-                         <p><b>Version:</b> 1.0.0</p>
-                         <p><b>Created by:</b> QRTQuick</p>""")
+        about_text = """
+        <div style='text-align: center;'>
+            <h2>DurangDBack Notepad</h2>
+            <h4>Version 1.0.0</h4>
+            <p>A professional note-taking application with voice commands and automatic backups.</p>
+            <hr>
+            <p><b>Created by Chsiom Eke</b><br>
+            Brand Owner of Quick Red Tech</p>
+            <hr>
+            <h4>Features:</h4>
+            <ul style='list-style-type: none; padding: 0;'>
+                <li>✍️ Rich Text Editing</li>
+                <li>🎤 Voice Commands</li>
+                <li>💾 Automatic Backups</li>
+                <li>🎨 Custom Themes</li>
+                <li>📝 Multiple Font Styles</li>
+                <li>🔄 Auto-Save</li>
+            </ul>
+            <p><small>Copyright © 2025 Quick Red Tech. All rights reserved.</small></p>
+        </div>
+        """
+        QMessageBox.about(self, "About DurangDBack", about_text)
+
+    def show_voice_commands(self):
+        """Show available voice commands in a dialog"""
+        commands_text = """
+        <div style='font-family: Segoe UI, Arial, sans-serif;'>
+            <h2 style='color: #c41e3a; text-align: center;'>🎤 Voice Commands Guide</h2>
+            
+            <div style='margin: 10px 0;'>
+                <h3 style='color: #444;'>📝 File Operations</h3>
+                <ul>
+                    <li><b>"new note"</b> or <b>"create note"</b> - Start a new note</li>
+                    <li><b>"save note"</b> or <b>"save this"</b> - Save current note</li>
+                    <li><b>"list notes"</b> or <b>"show notes"</b> - View saved notes</li>
+                    <li><b>"clear note"</b> or <b>"clear all"</b> - Clear current note</li>
+                </ul>
+            </div>
+
+            <div style='margin: 10px 0;'>
+                <h3 style='color: #444;'>🎨 Text Formatting</h3>
+                <ul>
+                    <li><b>"make bold"</b> or <b>"bold text"</b> - Make text bold</li>
+                    <li><b>"make italic"</b> or <b>"italicize"</b> - Make text italic</li>
+                    <li><b>"regular text"</b> or <b>"normal text"</b> - Reset formatting</li>
+                    <li><b>"font size [number]"</b> - Change text size (e.g., "font size 16")</li>
+                    <li><b>"color [name]"</b> - Change text color (e.g., "color red")</li>
+                </ul>
+            </div>
+
+            <div style='margin: 10px 0;'>
+                <h3 style='color: #444;'>⌨️ Navigation & Editing</h3>
+                <ul>
+                    <li><b>"go to top"</b> or <b>"scroll up"</b> - Move to start</li>
+                    <li><b>"go to bottom"</b> or <b>"scroll down"</b> - Move to end</li>
+                    <li><b>"select all"</b> - Select all text</li>
+                    <li><b>"copy"</b> or <b>"paste"</b> - Copy/paste text</li>
+                    <li><b>"undo"</b> or <b>"redo"</b> - Undo/redo changes</li>
+                </ul>
+            </div>
+
+            <div style='margin: 10px 0;'>
+                <h3 style='color: #444;'>📄 Special Formatting</h3>
+                <ul>
+                    <li><b>"title: [text]"</b> - Create large title</li>
+                    <li><b>"heading: [text]"</b> - Create section heading</li>
+                    <li><b>"new line"</b> or <b>"new paragraph"</b> - Insert line break</li>
+                    <li><b>"insert date"</b> or <b>"insert time"</b> - Add current date/time</li>
+                </ul>
+            </div>
+
+            <div style='margin: 10px 0;'>
+                <h3 style='color: #444;'>🔄 App Control</h3>
+                <ul>
+                    <li><b>"about"</b> - Show app information</li>
+                    <li><b>"help"</b> - Show this help guide</li>
+                    <li><b>"credits"</b> - Show development credits</li>
+                    <li><b>"quit app"</b> or <b>"exit"</b> - Close the application</li>
+                </ul>
+            </div>
+
+            <div style='margin: 10px 0; text-align: center; color: #666;'>
+                <p><i>💡 Tip: Click the microphone button 🎤 to start/stop voice recognition</i></p>
+                <p><i>🗣️ Any other spoken text will be inserted into your note</i></p>
+            </div>
+        </div>
+        """
+        help_dialog = QDialog(self)
+        help_dialog.setWindowTitle("Voice Commands Help")
+        help_dialog.setMinimumWidth(500)
+        help_dialog.setMinimumHeight(600)
+
+        layout = QVBoxLayout()
+        text_browser = QTextEdit()
+        text_browser.setReadOnly(True)
+        text_browser.setHtml(commands_text)
+        layout.addWidget(text_browser)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(help_dialog.accept)
+        layout.addWidget(close_btn)
+
+        help_dialog.setLayout(layout)
+        help_dialog.exec()
+
+    def show_credits(self):
+        credits_text = """
+        <div style='text-align: center;'>
+            <h2>Credits & Acknowledgments</h2>
+            <hr>
+            <h4>Development Team:</h4>
+            <p><b>Lead Developer & Designer:</b><br>
+            Chsiom Eke<br>
+            <small>Quick Red Tech</small></p>
+            
+            <h4>Technologies Used:</h4>
+            <ul style='list-style-type: none; padding: 0;'>
+                <li><b>UI Framework:</b> PySide6 (Qt)</li>
+                <li><b>Voice Recognition:</b> SpeechRecognition</li>
+                <li><b>Theme Engine:</b> Custom QT Theming</li>
+            </ul>
+            
+            <h4>Special Thanks:</h4>
+            <p>To the open source community and<br>
+            all Quick Red Tech team members</p>
+            
+            <hr>
+            <p><small>DurangDBack is a product of Quick Red Tech<br>
+            Developed with ❤️ by Chsiom Eke</small></p>
+        </div>
+        """
+        QMessageBox.about(self, "Credits - DurangDBack", credits_text)
 
     def confirm_action(self, title, message):
         return QMessageBox.question(self, title, message,
@@ -456,19 +853,24 @@ class DurangMain(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     apply_dark_theme(app)
-    
-    # Create system tray icon for voice feedback
-    tray_icon = QSystemTrayIcon(QIcon(os.path.join(os.getcwd(), "assets", "app_icon.png")), app)
-    tray_icon.setToolTip("DurangDBack - Voice Commands Active")
-    tray_icon.show()
-    
     window = DurangMain()
     
     # Handle application shutdown
     def cleanup():
-        if hasattr(window, 'voice_manager'):
-            window.voice_manager.stop_listening()
-        tray_icon.hide()
+        try:
+            if hasattr(window, 'voice_manager'):
+                try:
+                    window.voice_manager.stop_listening()
+                except Exception as e:
+                    print(f"Error stopping voice manager during cleanup: {str(e)}")
+            
+            if hasattr(window, 'voice_btn'):
+                try:
+                    window.voice_btn.setChecked(False)
+                except Exception as e:
+                    print(f"Error resetting voice button during cleanup: {str(e)}")
+        except Exception as e:
+            print(f"Error during application cleanup: {str(e)}")
     
     app.aboutToQuit.connect(cleanup)
     sys.exit(app.exec())
