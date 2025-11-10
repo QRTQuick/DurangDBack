@@ -10,6 +10,7 @@ from datetime import datetime
 from core.theme_manager import ThemeManager, Theme
 from core.voice_manager import VoiceManager
 from core.splash_screen import SplashScreen
+from core.thread_manager import ThreadManager
 
 # Create a simple red square icon for the system tray
 def create_app_icon():
@@ -108,6 +109,9 @@ class DurangMain(QMainWindow):
         self.splash = SplashScreen()
         self.splash.show()
         
+        # Initialize thread manager
+        self.thread_manager = ThreadManager()
+        
         # Initialize voice manager (but don't start listening yet)
         self.voice_manager = VoiceManager()
         self.voice_manager.voice_command_received.connect(self.handle_voice_command)
@@ -123,8 +127,23 @@ class DurangMain(QMainWindow):
         # Initialize paths
         self.notes_dir = os.path.join(os.getcwd(), "notes")
         self.backup_dir = os.path.join(os.getcwd(), "backup")
-        os.makedirs(self.notes_dir, exist_ok=True)
-        os.makedirs(self.backup_dir, exist_ok=True)
+        
+        # Create directories in background
+        def init_dirs_task(progress_callback, status_callback):
+            status_callback("Creating notes directory...")
+            progress_callback(25)
+            os.makedirs(self.notes_dir, exist_ok=True)
+            
+            status_callback("Creating backup directory...")
+            progress_callback(75)
+            os.makedirs(self.backup_dir, exist_ok=True)
+            progress_callback(100)
+            
+        self.thread_manager.start_worker(
+            "init_dirs",
+            init_dirs_task,
+            on_error=lambda e: print(f"Error creating directories: {e}")
+        )
     
     def delayed_init(self):
         self.setWindowTitle("DurangDBack - Notepad")
@@ -593,13 +612,51 @@ class DurangMain(QMainWindow):
                     text = self.text_edit.toPlainText()
                 
                 if text:
-                    self.voice_manager.speak_text(text)
-                    self.statusBar().showMessage("Reading text aloud...")
+                    def tts_task(progress_callback, status_callback):
+                        status_callback("Initializing text-to-speech...")
+                        progress_callback(10)
+                        
+                        # Break text into chunks for progress updates
+                        chunks = [text[i:i+100] for i in range(0, len(text), 100)]
+                        total_chunks = len(chunks)
+                        
+                        for i, chunk in enumerate(chunks, 1):
+                            if not hasattr(self, 'voice_manager'):  # Check if stopped
+                                return
+                            self.voice_manager.speak_text(chunk)
+                            progress_callback(int(90 * i / total_chunks) + 10)
+                            status_callback(f"Reading chunk {i}/{total_chunks}...")
+                        
+                        return "Speech completed"
+                    
+                    def on_tts_progress(percent):
+                        self.statusBar().showMessage(f"Reading... {percent}%")
+                    
+                    def on_tts_status(msg):
+                        self.statusBar().showMessage(msg)
+                    
+                    def on_tts_error(error_info):
+                        exctype, value, tb = error_info
+                        self.speak_btn.setChecked(False)
+                        self.statusBar().showMessage(f"Error in text-to-speech: {str(value)}", 5000)
+                        print(f"Error in text-to-speech: {str(value)}")
+                    
+                    # Start TTS in background
+                    self.thread_manager.start_worker(
+                        "text_to_speech",
+                        tts_task,
+                        on_error=on_tts_error,
+                        on_progress=on_tts_progress,
+                        on_status=on_tts_status
+                    )
                 else:
                     self.speak_btn.setChecked(False)
                     self.statusBar().showMessage("No text to read", 3000)
             else:
-                self.voice_manager.stop_speaking()
+                # Stop any running TTS
+                self.thread_manager.stop_worker("text_to_speech")
+                if hasattr(self, 'voice_manager'):
+                    self.voice_manager.stop_speaking()
                 self.statusBar().showMessage("Stopped reading", 3000)
         except Exception as e:
             self.speak_btn.setChecked(False)
@@ -855,34 +912,95 @@ class DurangMain(QMainWindow):
             "Text Files (*.txt)")
 
         if path:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
+            def save_task(progress_callback, status_callback):
+                # Save main file
+                status_callback("Saving note...")
+                progress_callback(25)
+                
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                progress_callback(50)
+                
+                # Create backup
+                status_callback("Creating backup...")
+                backup_path = os.path.join(self.backup_dir, os.path.basename(path))
+                with open(backup_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                progress_callback(100)
+                
+                return path
             
-            # Create backup
-            backup_path = os.path.join(self.backup_dir, os.path.basename(path))
-            with open(backup_path, "w", encoding="utf-8") as f:
-                f.write(text)
+            def on_save_success(save_path):
+                QMessageBox.information(self, "Saved", f"Note saved at:\n{save_path}")
+                self.statusBar().showMessage(f"Saved note: {os.path.basename(save_path)}")
+                
+            def on_save_error(error_info):
+                exctype, value, tb = error_info
+                QMessageBox.critical(self, "Error Saving",
+                                   f"Failed to save note:\n{str(value)}")
+                self.statusBar().showMessage("Error saving note", 5000)
+                
+            def on_save_progress(percent):
+                self.statusBar().showMessage(f"Saving... {percent}%")
             
-            QMessageBox.information(self, "Saved", f"Note saved at:\n{path}")
-            self.statusBar().showMessage(f"Saved note: {os.path.basename(path)}")
+            # Start save operation in background
+            self.thread_manager.start_worker(
+                "save_note",
+                save_task,
+                on_result=on_save_success,
+                on_error=on_save_error,
+                on_progress=on_save_progress
+            )
 
     def list_notes(self):
-        notes = os.listdir(self.notes_dir)
-        notes = [n for n in notes if n.endswith('.txt')]
-        if not notes:
-            QMessageBox.information(self, "No Notes", "No saved notes found.")
-            return
-
-        # Create a more detailed notes list
-        note_info = []
-        for note in notes:
-            path = os.path.join(self.notes_dir, note)
-            size = os.path.getsize(path)
-            modified = datetime.fromtimestamp(os.path.getmtime(path))
-            note_info.append(f"{note}\nSize: {size/1024:.1f}KB\nModified: {modified:%Y-%m-%d %H:%M}")
+        def scan_notes_task(progress_callback, status_callback):
+            status_callback("Scanning notes directory...")
+            progress_callback(10)
+            
+            notes = os.listdir(self.notes_dir)
+            notes = [n for n in notes if n.endswith('.txt')]
+            if not notes:
+                return []
+            
+            # Create a more detailed notes list
+            note_info = []
+            total_notes = len(notes)
+            for i, note in enumerate(notes, 1):
+                path = os.path.join(self.notes_dir, note)
+                size = os.path.getsize(path)
+                modified = datetime.fromtimestamp(os.path.getmtime(path))
+                note_info.append(f"{note}\nSize: {size/1024:.1f}KB\nModified: {modified:%Y-%m-%d %H:%M}")
+                
+                progress = 10 + int(90 * i / total_notes)
+                progress_callback(progress)
+                status_callback(f"Scanning notes... {i}/{total_notes}")
+            
+            return note_info
         
-        QMessageBox.information(self, "Saved Notes", "\n\n".join(note_info))
-        self.statusBar().showMessage(f"Found {len(notes)} notes")
+        def on_scan_complete(note_info):
+            if not note_info:
+                QMessageBox.information(self, "No Notes", "No saved notes found.")
+            else:
+                QMessageBox.information(self, "Saved Notes", "\n\n".join(note_info))
+                self.statusBar().showMessage(f"Found {len(note_info)} notes")
+        
+        def on_scan_error(error_info):
+            exctype, value, tb = error_info
+            QMessageBox.critical(self, "Error",
+                               f"Failed to list notes:\n{str(value)}")
+            self.statusBar().showMessage("Error listing notes", 5000)
+        
+        def on_scan_progress(percent):
+            self.statusBar().showMessage(f"Scanning notes... {percent}%")
+        
+        # Start scanning in background
+        self.thread_manager.start_worker(
+            "list_notes",
+            scan_notes_task,
+            on_result=on_scan_complete,
+            on_error=on_scan_error,
+            on_progress=on_scan_progress
+        )
 
 
 # === Run App ===
@@ -894,17 +1012,27 @@ if __name__ == "__main__":
     # Handle application shutdown
     def cleanup():
         try:
+            # Stop all worker threads
+            if hasattr(window, 'thread_manager'):
+                try:
+                    window.thread_manager.stop_all()
+                except Exception as e:
+                    print(f"Error stopping threads during cleanup: {str(e)}")
+            
+            # Stop voice manager
             if hasattr(window, 'voice_manager'):
                 try:
                     window.voice_manager.stop_listening()
                 except Exception as e:
                     print(f"Error stopping voice manager during cleanup: {str(e)}")
             
+            # Reset button states
             if hasattr(window, 'voice_btn'):
                 try:
                     window.voice_btn.setChecked(False)
                 except Exception as e:
                     print(f"Error resetting voice button during cleanup: {str(e)}")
+                    
         except Exception as e:
             print(f"Error during application cleanup: {str(e)}")
     
