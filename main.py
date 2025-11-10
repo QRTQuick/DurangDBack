@@ -2,8 +2,8 @@
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTextEdit, QVBoxLayout,
     QWidget, QPushButton, QHBoxLayout, QFileDialog, QMessageBox, QMenuBar,
     QMenu, QToolBar, QDialog, QLabel, QCheckBox, QDialogButtonBox, QStatusBar,
-    QFontComboBox, QSpinBox, QComboBox, QColorDialog, QFontDialog, QSystemTrayIcon)
-from PySide6.QtGui import QPalette, QColor, QAction, QIcon, QFont, QTextCharFormat, QActionGroup
+    QFontComboBox, QSpinBox, QComboBox, QColorDialog, QFontDialog)
+from PySide6.QtGui import QPalette, QColor, QAction, QIcon, QFont, QTextCharFormat, QActionGroup, QTextCursor
 from PySide6.QtCore import Qt, QTimer
 import os, sys
 from datetime import datetime
@@ -43,9 +43,9 @@ def apply_dark_theme(app):
 
     app.setPalette(palette)
 
-def show_voice_notification(tray_icon, message):
-    """Show a system tray notification for voice commands"""
-    tray_icon.showMessage("Voice Command", message, QSystemTrayIcon.Information, 2000)
+def show_status_message(self, message, timeout=3000):
+    """Show a message in the status bar"""
+    self.statusBar().showMessage(message, timeout)
 
 # === Main window ===
 class TermsDialog(QDialog):
@@ -193,15 +193,15 @@ class DurangMain(QMainWindow):
                     self.text_edit.setCurrentCharFormat(format)
                     self.text_edit.insertPlainText(text + "\n")
                 
-                # Navigation
+                # Navigation and text operations
+                elif action == "nav:page_up":
+                    self.text_edit.moveCursor(QTextCursor.PreviousPage)
+                elif action == "nav:page_down":
+                    self.text_edit.moveCursor(QTextCursor.NextPage)
                 elif action == "nav:top":
-                    cursor = self.text_edit.textCursor()
-                    cursor.movePosition(cursor.Start)
-                    self.text_edit.setTextCursor(cursor)
+                    self.text_edit.moveCursor(QTextCursor.Start)
                 elif action == "nav:bottom":
-                    cursor = self.text_edit.textCursor()
-                    cursor.movePosition(cursor.End)
-                    self.text_edit.setTextCursor(cursor)
+                    self.text_edit.moveCursor(QTextCursor.End)
                 elif action == "nav:select_all":
                     self.text_edit.selectAll()
                 elif action == "nav:copy":
@@ -212,12 +212,33 @@ class DurangMain(QMainWindow):
                     self.text_edit.undo()
                 elif action == "nav:redo":
                     self.text_edit.redo()
+                elif action.startswith("nav:find:"):
+                    text = action.split(":", 2)[-1]
+                    self.text_edit.find(text)
+                
+                # Text-to-speech commands
+                elif action == "read:all":
+                    self.voice_manager.speak_text(self.text_edit.toPlainText())
+                elif action == "read:selection":
+                    text = self.text_edit.textCursor().selectedText()
+                    if text:
+                        self.voice_manager.speak_text(text)
+                    else:
+                        self.show_status_message("No text selected", 3000)
+                elif action == "read:stop":
+                    self.voice_manager.stop_speaking()
+                elif action == "read:pause":
+                    # Pause functionality will be implemented when supported
+                    self.show_status_message("Pause reading not yet supported", 3000)
+                elif action == "read:resume":
+                    # Resume functionality will be implemented when supported
+                    self.show_status_message("Resume reading not yet supported", 3000)
                 
                 # Show dialogs
                 elif action == "show:about":
                     self.show_about()
                 elif action == "show:help":
-                    self.show_help()
+                    self.show_voice_commands()
                 elif action == "show:credits":
                     self.show_credits()
                 
@@ -227,14 +248,14 @@ class DurangMain(QMainWindow):
                     self.text_edit.insertPlainText(text + " ")
                 
                 # Show feedback in status bar
-                self.statusBar().showMessage(feedback, 3000)
+                self.show_status_message(feedback)
             
             except Exception as e:
-                self.statusBar().showMessage(f"Error executing command: {str(e)}", 5000)
+                self.show_status_message(f"Error executing command: {str(e)}", 5000)
                 print(f"Error executing voice command: {str(e)}")
         
         except Exception as e:
-            self.statusBar().showMessage("Error processing voice command", 3000)
+            self.show_status_message("Error processing voice command", 3000)
             print(f"Error in voice command handling: {str(e)}")
     
     def setup_menubar(self):
@@ -383,6 +404,16 @@ class DurangMain(QMainWindow):
         # Add separator
         toolbar.addSeparator()
         
+        # Voice buttons layout
+        voice_toolbar = QToolBar()
+        voice_toolbar.setStyleSheet("""
+            QToolBar {
+                spacing: 5px;
+                padding: 0px;
+                border: none;
+            }
+        """)
+        
         # Voice command button (Press to talk)
         self.voice_btn = QPushButton("🎤")  # Microphone emoji
         self.voice_btn.setStatusTip("Press and hold to give voice commands")
@@ -393,6 +424,8 @@ class DurangMain(QMainWindow):
                 background-color: #444;
                 color: white;
                 font-size: 16px;
+                padding: 0px;
+                margin: 0px 2px;
             }
             QPushButton:pressed {
                 background-color: #c41e3a;
@@ -404,10 +437,7 @@ class DurangMain(QMainWindow):
         # Use press and release events instead of toggle
         self.voice_btn.pressed.connect(self.start_voice_assistant)
         self.voice_btn.released.connect(self.stop_voice_assistant)
-        toolbar.addWidget(self.voice_btn)
-        
-        # Add separator
-        toolbar.addSeparator()
+        voice_toolbar.addWidget(self.voice_btn)
         
         # Text-to-speech button
         self.speak_btn = QPushButton("🔊")  # Speaker emoji
@@ -420,6 +450,8 @@ class DurangMain(QMainWindow):
                 background-color: #444;
                 color: white;
                 font-size: 16px;
+                padding: 0px;
+                margin: 0px 2px;
             }
             QPushButton:checked {
                 background-color: #006400;
@@ -431,8 +463,12 @@ class DurangMain(QMainWindow):
                 background-color: #008000;
             }
         """)
-        self.voice_btn.clicked.connect(self.toggle_voice_assistant)
-        toolbar.addWidget(self.voice_btn)
+        self.speak_btn.clicked.connect(self.toggle_text_to_speech)
+        voice_toolbar.addWidget(self.speak_btn)
+        
+        # Add voice toolbar to main toolbar
+        toolbar.addSeparator()
+        toolbar.addWidget(voice_toolbar)
     
     def setup_central_widget(self):
         self.text_edit = QTextEdit()
